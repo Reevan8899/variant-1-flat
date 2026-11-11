@@ -51,7 +51,7 @@ def print_notes(notes: list[Note]) -> None:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = make_parser().parse_args(argv)
-        path = args.db or Path(os.environ.get("NOTES_FILE", "notes.sqlite3"))
+        path = args.db or Path(os.environ.get("NOTES_FILE", "notes.json"))
         match args.command:
             case "add":
                 note = handlers.add_note(path, args.title, args.body, args.tags)

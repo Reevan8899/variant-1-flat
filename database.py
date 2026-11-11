@@ -1,79 +1,83 @@
-"""Операции SQLite для заметок и тегов."""
+"""JSON-хранилище с прежними функциями модуля database."""
 
-import sqlite3
-from collections import defaultdict
-from contextlib import closing, contextmanager
+import json
+import os
+import tempfile
+from contextlib import contextmanager
+from dataclasses import asdict, replace
 from pathlib import Path
+
+from filelock import FileLock, Timeout
 
 from models import Note, NoteError, Tag
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS notes (
-    id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tags (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-CREATE TABLE IF NOT EXISTS note_tags (
-    note_id TEXT REFERENCES notes(id) ON DELETE CASCADE,
-    tag_id TEXT REFERENCES tags(id), PRIMARY KEY (note_id, tag_id)
-);
-"""
+
+def load_all(path: Path) -> list[Note]:
+    try:
+        with path.open(encoding="utf-8") as source:
+            records = json.load(source)
+        if not isinstance(records, list):
+            raise ValueError("Expected a list of notes")
+        notes = []
+        for record in records:
+            fields = dict(record)
+            fields["tags"] = tuple(Tag(**tag) for tag in fields["tags"])
+            notes.append(Note(**fields))
+        notes.sort(key=lambda note: note.id)
+        return sorted(notes, key=lambda note: note.created_at, reverse=True)
+    except FileNotFoundError:
+        return []
+    except (OSError, TypeError, ValueError, KeyError) as error:
+        raise NoteError("Хранилище JSON недоступно. Проверьте путь и формат файла.") from error
 
 
 @contextmanager
-def _connect(path: Path):
+def _write_notes(path: Path):
+    path = path.resolve()
+    lock = FileLock(path.with_name(f"{path.name}.lock"), timeout=2)
     try:
-        with closing(sqlite3.connect(path)) as connection:
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.executescript(SCHEMA)
-            with connection:
-                yield connection
-    except sqlite3.Error as error:
-        raise NoteError("Хранилище SQLite недоступно. Проверьте путь и формат файла.") from error
+        with lock:
+            notes = load_all(path)
+            yield notes
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix=".notes-", suffix=".tmp")
+            temporary = Path(name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as target:
+                    json.dump([asdict(note) for note in notes], target, ensure_ascii=False)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    except (OSError, Timeout) as error:
+        raise NoteError("Хранилище JSON недоступно. Проверьте права доступа и повторите операцию.") from error
 
 
-def _set_tags(connection, note_id: str, tags: tuple[Tag, ...]) -> None:
-    connection.execute("DELETE FROM note_tags WHERE note_id = ?", (note_id,))
-    connection.executemany("INSERT OR IGNORE INTO tags VALUES (?, ?)", ((tag.id, tag.name) for tag in tags))
-    connection.executemany("INSERT INTO note_tags VALUES (?, ?)", ((note_id, tag.id) for tag in tags))
-
-
-def _prune_tags(connection) -> None:
-    connection.execute("DELETE FROM tags WHERE NOT EXISTS (SELECT 1 FROM note_tags WHERE tag_id = tags.id)")
+def _index(notes: list[Note], note_id: str) -> int:
+    for index, note in enumerate(notes):
+        if note.id == note_id:
+            return index
+    raise NoteError(f"Заметка {note_id} не найдена.")
 
 
 def insert(path: Path, note: Note) -> None:
-    with _connect(path) as connection:
-        connection.execute("INSERT INTO notes VALUES (?, ?, ?, ?, ?)", (note.id, note.title, note.body, note.created_at, note.updated_at))
-        _set_tags(connection, note.id, note.tags)
-
-
-def load_all(path: Path) -> list[Note]:
-    with _connect(path) as connection:
-        connection.execute("BEGIN")
-        tags_by_note = defaultdict(list)
-        for row in connection.execute("SELECT note_id, tags.id, name FROM note_tags JOIN tags ON tags.id = tag_id ORDER BY name"):
-            tags_by_note[row["note_id"]].append(Tag(row["id"], row["name"]))
-        rows = connection.execute("SELECT * FROM notes ORDER BY created_at DESC, id")
-        return [Note(**dict(row), tags=tuple(tags_by_note[row["id"]])) for row in rows]
+    with _write_notes(path) as notes:
+        notes.append(note)
 
 
 def update(path: Path, note_id: str, title: str | None, body: str | None, tags: tuple[Tag, ...] | None, updated_at: str) -> None:
-    with _connect(path) as connection:
-        result = connection.execute(
-            "UPDATE notes SET title = COALESCE(?, title), body = COALESCE(?, body), updated_at = ? WHERE id = ?",
-            (title, body, updated_at, note_id),
+    with _write_notes(path) as notes:
+        index = _index(notes, note_id)
+        original = notes[index]
+        notes[index] = replace(
+            original,
+            title=original.title if title is None else title,
+            body=original.body if body is None else body,
+            tags=original.tags if tags is None else tags,
+            updated_at=updated_at,
         )
-        if result.rowcount == 0:
-            raise NoteError(f"Заметка {note_id} не найдена.")
-        if tags is not None:
-            _set_tags(connection, note_id, tags)
-            _prune_tags(connection)
 
 
 def delete(path: Path, note_id: str) -> None:
-    with _connect(path) as connection:
-        if connection.execute("DELETE FROM notes WHERE id = ?", (note_id,)).rowcount == 0:
-            raise NoteError(f"Заметка {note_id} не найдена.")
-        _prune_tags(connection)
+    with _write_notes(path) as notes:
+        del notes[_index(notes, note_id)]

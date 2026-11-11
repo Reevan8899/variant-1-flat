@@ -1,6 +1,8 @@
 """Проверка данных и обработка команд менеджера заметок."""
 
+import csv
 from pathlib import Path
+from typing import TextIO
 from uuid import uuid4
 
 import database
@@ -54,3 +56,10 @@ def edit_note(path: Path, note_id: str, title: str | None, body: str | None, tag
 
 def delete_note(path: Path, note_id: str) -> None:
     database.delete(path, note_id)
+
+
+def export_to_csv(notes: list[Note], output: TextIO) -> None:
+    writer = csv.writer(output)
+    writer.writerow(["id", "title", "body", "tags"])
+    for note in notes:
+        writer.writerow([note.id, note.title, note.body, ", ".join(tag.name for tag in note.tags)])

@@ -35,6 +35,8 @@ def make_parser() -> NoteParser:
     tags.add_argument("--tag", dest="tags", action="append")
     tags.add_argument("--clear-tags", dest="tags", action="store_const", const=[])
     commands.add_parser("delete", help="Удалить заметку").add_argument("id")
+    export = commands.add_parser("export", help="Выгрузить CSV")
+    export.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -68,6 +70,14 @@ def main(argv: list[str] | None = None) -> int:
             case "delete":
                 handlers.delete_note(path, args.id)
                 print(f"Заметка удалена. ID: {args.id}")
+            case "export":
+                notes = handlers.list_notes(path)
+                try:
+                    with args.output.open("x", encoding="utf-8", newline="") as output:
+                        handlers.export_to_csv(notes, output)
+                except OSError as error:
+                    raise NoteError("Не удалось создать CSV. Укажите доступный путь к новому файлу.") from error
+                print(f"Выгружено заметок: {len(notes)}")
     except NoteError as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         return 2

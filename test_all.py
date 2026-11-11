@@ -1,5 +1,6 @@
 """Единые проверки пользовательских команд для Flat и Modular."""
 
+import csv
 import re
 
 import pytest
@@ -138,3 +139,14 @@ def test_invalid_storage_is_preserved(cli):
     path.write_bytes(b"invalid storage")
     assert "Хранилище" in run("list", code=2).err
     assert path.read_bytes() == b"invalid storage"
+
+
+def test_export_to_csv(cli, tmp_path):
+    run, _ = cli
+    note = create(run, "Тема, с запятой", body="Текст\nна второй строке", tags=["работа"])
+    path = tmp_path / "export.csv"
+    run("export", "--output", str(path))
+    with path.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.reader(source))
+    assert rows == [["id", "title", "body", "tags"], [note, "Тема, с запятой", "Текст\nна второй строке", "работа"]]
+    assert "CSV" in run("export", "--output", str(path), code=2).err
